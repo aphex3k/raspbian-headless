@@ -1,0 +1,106 @@
+#!/bin/sh
+#### Title: Raspbian Headless
+#### Description: The script downloads and modifies raspian lite for 
+#### headless installation
+#### Written by: Michael Henke
+#### See: https://github.com/aphex3k/raspbian-headless
+
+# The file name as found on ther download server
+file=2016-02-26-raspbian-jessie-lite.zip
+
+# The url where we can find our zip archive of raspian
+url=http://downloads.raspberrypi.org/raspbian_lite/images/raspbian_lite-2016-02-29/${file}
+
+# The sha1 of the compressed archive after download
+sha1sum=0d58e68d62cb3e55bdc73860a6be2281783b8c0f
+
+# the temporary folder we will download, mount and modify our file to
+tmpdir=`mktemp -d -p . -t 'headlesstmp.XXXXX'`
+
+# after unzipping the file has the .img extension
+img=`basename ${file} .zip`.img
+
+# filename used to create the input for sha1sum to validate downloaded file
+sha1=`basename ${file} .zip`.sha1
+
+# note current directory to return to after script completes
+pwd=`pwd`
+
+# lets sit in our temporary directory and start creating files
+cd ${tmpdir}
+
+# generate the checksum file
+echo ${sha1sum} ${file} > ${sha1}
+
+# download the original raspbian image
+# curl -fOSL ${url}
+cp ../../${file} . || curl -fOSL ${url}
+
+# after download, check if we got what we expected to get, if not, bail
+sha1sum -c ${sha1} || exit $?
+
+# unzip the archive
+unzip ${file} 1>/dev/null
+
+# we need to know the starting sector and sector size for our loopback mount
+ssector=`fdisk -l ${img} | grep -i linux | tr -s ' ' | cut -d " " -f 2`
+units=`fdisk -l ${img} | grep -i sectors | grep -i units | tr -s ' ' | cut -d " " -f 6`
+offset=$((${ssector} * ${units}))
+
+# lets create a mountpoint
+mkdir mnt
+mnt=`pwd`/mnt
+
+# mount the image at our mountpoint
+mount -o loop,offset=${offset} ${img} ${mnt}
+
+# get into our mount point to start modifying files
+cd ${mnt}
+
+# set eth0 to dhcp mode
+sed -i.bak '/iface eth0 inet manual/d' etc/network/interfaces
+
+cat << 'EOF' >> etc/network/interfaces
+auto eth0
+allow-hotplug eth0
+iface eth0 inet dhcp
+EOF
+
+# read dhcpcd manual for configuration options
+cat << 'EOF' >> etc/dhcpcd.conf
+# define static profile
+profile static_eth0
+static ip_address=192.168.23.2/24
+static routers=192.168.23.1
+static domain_name_servers=192.168.23.1
+
+# fallback to static profile on eth0
+interface eth0
+fallback static_eth0
+EOF
+
+# the ssh.override file prevents the ssh init script from launching
+if [ -f etc/init/ssh.override ]; then
+rm etc/init/ssh.override
+fi
+
+# change hostname from raspberrypi to headlesspi
+echo headlesspi > etc/hostname
+cat etc/hosts | sed s/raspberrypi/headlesspi/g > etc/hosts.headless
+mv etc/hosts.headless etc/hosts
+
+# go back to where we came from
+cd ${pwd}
+
+# we need to wait for a sync before unmounting
+sync 
+
+# unmount image
+umount ${mnt}
+
+# copy the modified image to our originating folder
+headless=$(basename ${img} .img)-headless.img
+cp ${tmpdir}/${img} ${headless}
+
+# remove temporary folder and files
+rm -r ${tmpdir}
